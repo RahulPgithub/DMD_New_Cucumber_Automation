@@ -1,0 +1,196 @@
+package com.yourco.dmd.healing.retry;
+
+import com.yourco.dmd.healing.AiHealingEngine;
+import com.yourco.dmd.healing.HealingRegistry;
+import com.yourco.dmd.healing.model.HealingContext;
+import com.yourco.dmd.healing.model.HealingSuggestion;
+import org.testng.IRetryAnalyzer;
+import org.testng.ITestResult;
+
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+
+- TestNG IRetryAnalyzer that:
+- 1. On first failure → calls AI to get a healing suggestion.
+- 1. Registers the suggestion in HealingRegistry (step defs pick it up automatically).
+- 1. Retries the test once with the healed path/endpoint.
+- 1. On second failure → marks as FAILED_AGAIN (real bug, no more retries).
+- 
+- Wire this into your runner OR testng.xml — see bottom of file.
+  */
+  public class SelfHealingRetryAnalyzer implements IRetryAnalyzer {
+  
+  private static final int MAX_RETRIES = 1;   // Only one AI-assisted retry
+  
+  // Track how many times each test has been retried (thread-safe)
+  private static final Map<String, Integer> retryCount = new ConcurrentHashMap<>();
+  
+  private final AiHealingEngine engine = new AiHealingEngine();
+  
+  @Override
+  public boolean retry(ITestResult result) {
+  String key = buildKey(result);
+  int count  = retryCount.getOrDefault(key, 0);
+  
+  ```
+   if (count >= MAX_RETRIES) {
+       // Already retried once → mark as real bug
+       markAsRealBug(result, key);
+       return false;
+   }
+  
+   // Only heal structural failures, not business-logic assertions
+   if (!isHealableFailure(result.getThrowable())) {
+       HealingRegistry.markSkipped(key);
+       return false;
+   }
+  
+   // ── Step 1: build context from the failed result ──────────────────────
+   HealingContext ctx = extractContext(result, key);
+  
+   // ── Step 2: ask AI ────────────────────────────────────────────────────
+   HealingSuggestion suggestion = engine.analyze(ctx);
+   HealingRegistry.register(key, suggestion);
+  
+   if (!suggestion.isHealable()) {
+       suggestion.markSkipped();
+       return false;        // Don't retry if AI says it's a real bug
+   }
+  
+   // ── Step 3: increment counter and allow retry ─────────────────────────
+   retryCount.put(key, count + 1);
+  
+   System.out.printf("[SelfHealing] Retrying '%s' with AI suggestion: %s%n",
+           result.getName(), suggestion.getExplanation());
+  
+   return true;    // TestNG will re-run the test
+  ```
+  
+  }
+  
+  // ── Called by SelfHealingListener after retry result is known ─────────────
+  
+  public static void onRetryPassed(String scenarioId) {
+  HealingRegistry.getHeal(scenarioId)
+  .ifPresent(HealingSuggestion::markHealed);
+  }
+  
+  public static void onRetryFailed(String scenarioId, Throwable t) {
+  HealingRegistry.getHeal(scenarioId)
+  .ifPresent(s -> s.markFailedAgain(t.getMessage()));
+  }
+  
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  
+  /**
+  - Determines whether the failure is structural (healable) vs. a real assertion.
+  - Adjust the conditions to match your actual exception types.
+    */
+    private boolean isHealableFailure(Throwable t) {
+    if (t == null) return false;
+    String msg = t.getMessage() != null ? t.getMessage().toLowerCase() : “”;
+    
+    return msg.contains(“no results for path”)          // JsonPath miss
+    || msg.contains(“xpath evaluation”)             // XPath miss
+    || msg.contains(“nodelist is empty”)            // XML node missing
+    || msg.contains(“expected status code”)         // HTTP status mismatch (env)
+    || msg.contains(“connection refused”)           // Env/network issue
+    || msg.contains(“404”)                          // Endpoint moved
+    || t.getClass().getSimpleName().contains(“PathNotFoundException”);
+    }
+  
+  /**
+  - Extracts test context from the TestNG result.
+  - Pulls HealingContext from ITestResult parameters if your step definition
+  - attaches it (recommended), otherwise builds a minimal context.
+    */
+    private HealingContext extractContext(ITestResult result, String key) {
+    // Try to get rich context injected by the step definition
+    Object[] params = result.getParameters();
+    for (Object p : params) {
+    if (p instanceof HealingContext) return (HealingContext) p;
+    }
+    
+    // Fallback: minimal context from what TestNG exposes
+    return HealingContext.builder()
+    .scenarioId(key)
+    .testName(result.getName())
+    .errorMessage(result.getThrowable() != null
+    ? result.getThrowable().getMessage() : “Unknown error”)
+    .build();
+    }
+  
+  private void markAsRealBug(ITestResult result, String key) {
+  HealingRegistry.getHeal(key).ifPresent(s ->
+  s.markFailedAgain(result.getThrowable() != null
+  ? result.getThrowable().getMessage() : “Retry also failed”));
+  System.out.printf(”[SelfHealing] ‘%s’ failed after AI retry → real bug.%n”,
+  result.getName());
+  }
+  
+  /** Stable unique key: className#methodName */
+  private String buildKey(ITestResult result) {
+  return result.getTestClass().getName() + “#” + result.getName();
+  }
+  }
+
+/*
+
+- ═══════════════════════════════════════════════════════════════════
+- HOW TO WIRE IN THE RETRY ANALYZER
+- ═══════════════════════════════════════════════════════════════════
+- 
+- OPTION A — Annotate your AbstractTestNGCucumberTests runner:
+- 
+- @CucumberOptions(…)
+- public class CucumberTestRunner extends AbstractTestNGCucumberTests {
+- ```
+    @Override
+  ```
+- ```
+    @DataProvider(parallel = true)
+  ```
+- ```
+    public Object[][] scenarios() { return super.scenarios(); }
+  ```
+- }
+- 
+- Then in testng.xml:
+- <test name="DMD API Tests">
+- ```
+  <parameter name="retryAnalyzerClass"
+  ```
+- ```
+             value="com.yourco.dmd.healing.retry.SelfHealingRetryAnalyzer"/>
+  ```
+- ```
+  ...
+  ```
+- </test>
+- 
+- OPTION B — Surefire rerunFailingTestsCount (simpler, no AI context):
+- <plugin>
+- ```
+  <groupId>org.apache.maven.plugins</groupId>
+  ```
+- ```
+  <artifactId>maven-surefire-plugin</artifactId>
+  ```
+- ```
+  <configuration>
+  ```
+- ```
+    <rerunFailingTestsCount>1</rerunFailingTestsCount>
+  ```
+- ```
+  </configuration>
+  ```
+- </plugin>
+- Use OPTION A for full AI-assisted retry (recommended).
+- 
+- OPTION C — @Test annotation on individual tests (least preferred):
+- @Test(retryAnalyzer = SelfHealingRetryAnalyzer.class)
+- ═══════════════════════════════════════════════════════════════════
+  */
