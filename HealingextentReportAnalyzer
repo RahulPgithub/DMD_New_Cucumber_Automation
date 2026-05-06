@@ -1,0 +1,236 @@
+package com.yourco.dmd.healing.report;
+
+import com.aventstack.extentreports.ExtentReports;
+import com.aventstack.extentreports.ExtentTest;
+import com.aventstack.extentreports.Status;
+import com.aventstack.extentreports.markuputils.CodeLanguage;
+import com.aventstack.extentreports.markuputils.ExtentColor;
+import com.aventstack.extentreports.markuputils.Markup;
+import com.aventstack.extentreports.markuputils.MarkupHelper;
+import com.yourco.dmd.healing.HealingRegistry;
+import com.yourco.dmd.healing.model.HealingSuggestion;
+import com.yourco.dmd.healing.model.HealingSuggestion.HealingStatus;
+import org.testng.ITestContext;
+import org.testng.ITestListener;
+import org.testng.ITestResult;
+
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+/**
+
+- TestNG listener that appends an AI Self-Healing Summary section
+- to the existing Extent HTML report at the end of the suite.
+- 
+- Register alongside your existing ExtentCucumberReportListener in testng.xml.
+  */
+  public class HealingExtentReporter implements ITestListener {
+  
+  // ── Injected from your existing ExtentReports singleton ──────────────────
+  // Replace this with however your framework exposes the ExtentReports instance
+  private ExtentReports extent;
+  
+  @Override
+  public void onStart(ITestContext context) {
+  // Grab the shared ExtentReports instance
+  extent = ExtentReportManager.getInstance();
+  }
+  
+  // ── Main hook: fires after all tests in the suite finish ─────────────────
+  
+  @Override
+  public void onFinish(ITestContext context) {
+  Collection<HealingSuggestion> all = HealingRegistry.getAll();
+  if (all.isEmpty()) return;
+  
+  ```
+   writeHealingSummaryToExtent(all);
+   extent.flush();
+  ```
+  
+  }
+  
+  // ── Per-test hooks: annotate individual test nodes ────────────────────────
+  
+  @Override
+  public void onTestSuccess(ITestResult result) {
+  String key = buildKey(result);
+  HealingRegistry.getHeal(key).ifPresent(s -> {
+  if (s.getStatus() == HealingStatus.HEALED) {
+  ExtentTest node = ExtentReportManager.getTest(key);
+  if (node != null) {
+  node.log(Status.WARNING,
+  MarkupHelper.createLabel(
+  “⚡ AI SELF-HEALED — original test failed, AI fix applied and retry passed”,
+  ExtentColor.AMBER));
+  node.log(Status.INFO, healingDetailMarkup(s));
+  }
+  }
+  });
+  }
+  
+  @Override
+  public void onTestFailure(ITestResult result) {
+  String key = buildKey(result);
+  HealingRegistry.getHeal(key).ifPresent(s -> {
+  if (s.getStatus() == HealingStatus.FAILED_AGAIN) {
+  ExtentTest node = ExtentReportManager.getTest(key);
+  if (node != null) {
+  node.log(Status.FAIL,
+  MarkupHelper.createLabel(
+  “🔴 AI RETRY FAILED — likely a real bug”,
+  ExtentColor.RED));
+  node.log(Status.INFO, healingDetailMarkup(s));
+  }
+  }
+  });
+  }
+  
+  // ── Build the healing summary section ─────────────────────────────────────
+  
+  private void writeHealingSummaryToExtent(Collection<HealingSuggestion> all) {
+  ExtentTest summaryNode = extent.createTest(
+  “<b>🤖 AI Self-Healing Report</b>”,
+  “Summary of all self-healing attempts in this test run.”
+  );
+  
+  ```
+   // ── Stats ──────────────────────────────────────────────────────────────
+   long healed      = count(all, HealingStatus.HEALED);
+   long failedAgain = count(all, HealingStatus.FAILED_AGAIN);
+   long skipped     = count(all, HealingStatus.SKIPPED);
+   long pending     = count(all, HealingStatus.PENDING);
+  
+   String[][] statsTable = {
+       {"Metric", "Count"},
+       {"✅ Successfully Healed",  String.valueOf(healed)},
+       {"🔴 Failed After Healing", String.valueOf(failedAgain)},
+       {"⏭ Skipped (Real Bugs)",   String.valueOf(skipped)},
+       {"⏳ Pending",              String.valueOf(pending)},
+       {"📊 Total Attempts",       String.valueOf(all.size())}
+   };
+   summaryNode.log(Status.INFO, MarkupHelper.createTable(statsTable));
+  
+   // ── Category breakdown ─────────────────────────────────────────────────
+   Map<HealingSuggestion.FailureCategory, Long> byCategory = all.stream()
+       .collect(Collectors.groupingBy(HealingSuggestion::getFailureCategory,
+                Collectors.counting()));
+  
+   String[][] catTable = buildCategoryTable(byCategory);
+   summaryNode.log(Status.INFO,
+       MarkupHelper.createCodeBlock("Failure Category Breakdown", CodeLanguage.XML));
+   summaryNode.log(Status.INFO, MarkupHelper.createTable(catTable));
+  
+   // ── Per-scenario detail ────────────────────────────────────────────────
+   for (HealingSuggestion s : all) {
+       ExtentTest child = summaryNode.createNode(
+           scenarioLabel(s), s.getExplanation());
+       child.log(statusFor(s.getStatus()), healingDetailMarkup(s));
+   }
+  ```
+  
+  }
+  
+  // ── Markup builders ───────────────────────────────────────────────────────
+  
+  private Markup healingDetailMarkup(HealingSuggestion s) {
+  String detail = String.join(”\n”,
+  “Scenario ID  : “ + s.getScenarioId(),
+  “Category     : “ + s.getFailureCategory(),
+  “Confidence   : “ + String.format(”%.0f%%”, s.getConfidence() * 100),
+  “Original Path: “ + nvl(s.getOriginalPath()),
+  “Healed Path  : “ + nvl(s.getSuggestedPath()),
+  “Orig Endpoint: “ + nvl(s.getOriginalEndpoint()),
+  “New Endpoint : “ + nvl(s.getSuggestedEndpoint()),
+  “Status       : “ + s.getStatus(),
+  s.getRetryError() != null ? “Retry Error  : “ + s.getRetryError() : “”,
+  “Timestamp    : “ + s.getTimestamp(),
+  “AI Reasoning : “ + s.getExplanation()
+  );
+  return MarkupHelper.createCodeBlock(detail, CodeLanguage.XML);
+  }
+  
+  private String[][] buildCategoryTable(
+  Map<HealingSuggestion.FailureCategory, Long> map) {
+  String[][] t = new String[map.size() + 1][2];
+  t[0] = new String[]{“Failure Category”, “Count”};
+  int i = 1;
+  for (Map.Entry<HealingSuggestion.FailureCategory, Long> e : map.entrySet()) {
+  t[i++] = new String[]{e.getKey().name(), String.valueOf(e.getValue())};
+  }
+  return t;
+  }
+  
+  // ── Utility ───────────────────────────────────────────────────────────────
+  
+  private long count(Collection<HealingSuggestion> all, HealingStatus status) {
+  return all.stream().filter(s -> s.getStatus() == status).count();
+  }
+  
+  private Status statusFor(HealingStatus hs) {
+  return switch (hs) {
+  case HEALED       -> Status.WARNING;
+  case FAILED_AGAIN -> Status.FAIL;
+  case SKIPPED      -> Status.SKIP;
+  default           -> Status.INFO;
+  };
+  }
+  
+  private String scenarioLabel(HealingSuggestion s) {
+  String icon = switch (s.getStatus()) {
+  case HEALED       -> “✅”;
+  case FAILED_AGAIN -> “🔴”;
+  case SKIPPED      -> “⏭”;
+  default           -> “⏳”;
+  };
+  return icon + “ “ + s.getTestName();
+  }
+  
+  private String nvl(String v) { return v != null ? v : “—”; }
+  
+  private String buildKey(ITestResult r) {
+  return r.getTestClass().getName() + “#” + r.getName();
+  }
+  }
+
+/*
+
+- ═══════════════════════════════════════════════════════════════════
+- ExtentReportManager — minimal singleton adapter
+- ═══════════════════════════════════════════════════════════════════
+- Replace this with your existing ExtentReports manager class.
+- This stub shows the expected interface.
+- 
+- public class ExtentReportManager {
+- ```
+  private static ExtentReports instance;
+  ```
+- ```
+  private static Map<String, ExtentTest> testMap = new ConcurrentHashMap<>();
+  ```
+- 
+- ```
+  public static ExtentReports getInstance() { return instance; }
+  ```
+- ```
+  public static ExtentTest getTest(String key) { return testMap.get(key); }
+  ```
+- ```
+  public static void registerTest(String key, ExtentTest t) { testMap.put(key, t); }
+  ```
+- }
+- 
+- ═══════════════════════════════════════════════════════════════════
+- testng.xml — register both listeners
+- ═══════════════════════════════════════════════════════════════════
+- 
+- <listeners>
+- <listener class-name="com.yourco.dmd.healing.SelfHealingListener"/>
+- <listener class-name="com.yourco.dmd.healing.report.HealingExtentReporter"/>
+- <!-- your existing Extent listener below -->
+- <listener class-name="com.yourco.dmd.report.ExtentCucumberReportListener"/>
+- </listeners>
+- ═══════════════════════════════════════════════════════════════════
+  */
