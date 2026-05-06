@@ -1,0 +1,202 @@
+package com.dmd.api.model;
+
+import java.util.Map;
+import java.util.HashMap;
+
+/**
+
+- Captures all context about a failed test that is sent to the AI healing engine.
+- The richer the context, the better the AI suggestion.
+- 
+- Built by ApiRequestUtil.buildHealingContext() and consumed by AiHealingEngine.analyze().
+- 
+- Place this in: src/test/java/com/dmd/api/model/HealingContext.java
+  */
+  public class HealingContext {
+  
+  // ── Test identity ─────────────────────────────────────────────────────────
+  private final String scenarioId;       // Cucumber scenario ID (from Scenario.getId())
+  private final String testName;         // Human-readable scenario name
+  private final String scenarioTags;     // e.g. “@dmd-device-info @smoke”
+  
+  // ── Request details ───────────────────────────────────────────────────────
+  private final String method;           // GET, POST, PUT, DELETE
+  private final String endpoint;         // Full URL that was called
+  private final String requestBody;      // Request payload (if POST/PUT)
+  private final Map<String, String> requestHeaders;
+  
+  // ── Response details ──────────────────────────────────────────────────────
+  private final int statusCode;          // HTTP status code received
+  private final String responseBody;     // First 500 chars of response body
+  
+  // ── Failure details ───────────────────────────────────────────────────────
+  private final String errorMessage;     // Exception message
+  private final String errorType;        // Exception class name
+  private final String originalPath;     // XPath or JsonPath that failed
+  private final String microservice;     // e.g. dmd-device-info, dmd-wrapper-service
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Private constructor — use Builder
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  private HealingContext(Builder b) {
+  this.scenarioId      = b.scenarioId;
+  this.testName        = b.testName;
+  this.scenarioTags    = b.scenarioTags;
+  this.method          = b.method;
+  this.endpoint        = b.endpoint;
+  this.requestBody     = b.requestBody;
+  this.requestHeaders  = b.requestHeaders != null ? b.requestHeaders : new HashMap<>();
+  this.statusCode      = b.statusCode;
+  this.responseBody    = b.responseBody;
+  this.errorMessage    = b.errorMessage;
+  this.errorType       = b.errorType;
+  this.originalPath    = b.originalPath;
+  this.microservice    = b.microservice;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Static factory
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  public static Builder builder() {
+  return new Builder();
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Accessors
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  public String getScenarioId()                   { return scenarioId; }
+  public String getTestName()                     { return testName; }
+  public String getScenarioTags()                 { return scenarioTags; }
+  public String getMethod()                       { return method; }
+  public String getEndpoint()                     { return endpoint; }
+  public String getRequestBody()                  { return requestBody; }
+  public Map<String, String> getRequestHeaders()  { return requestHeaders; }
+  public int getStatusCode()                      { return statusCode; }
+  public String getResponseBody()                 { return responseBody; }
+  public String getErrorMessage()                 { return errorMessage; }
+  public String getErrorType()                    { return errorType; }
+  public String getOriginalPath()                 { return originalPath; }
+  public String getMicroservice()                 { return microservice; }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Derived helpers used by AiHealingEngine prompt builder
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  /** True if failure looks like an XPath miss */
+  public boolean isXmlPathFailure() {
+  return errorMessage != null && (
+  errorMessage.toLowerCase().contains(“xpath”)
+  || errorMessage.toLowerCase().contains(“nodelist”)
+  || errorMessage.toLowerCase().contains(“no results for path”)
+  );
+  }
+  
+  /** True if failure looks like a JsonPath miss */
+  public boolean isJsonPathFailure() {
+  return errorMessage != null && (
+  errorMessage.toLowerCase().contains(“jsonpath”)
+  || errorMessage.toLowerCase().contains(“no results for path”)
+  || errorMessage.toLowerCase().contains(“pathnotfound”)
+  );
+  }
+  
+  /** True if failure is an HTTP status mismatch */
+  public boolean isStatusCodeFailure() {
+  return errorMessage != null &&
+  errorMessage.toLowerCase().contains(“expected status”);
+  }
+  
+  /** True if failure looks like a network/env issue */
+  public boolean isNetworkFailure() {
+  return errorMessage != null && (
+  errorMessage.toLowerCase().contains(“connection refused”)
+  || errorMessage.toLowerCase().contains(“timeout”)
+  || errorMessage.toLowerCase().contains(“unreachable”)
+  || statusCode == 503 || statusCode == 502 || statusCode == 0
+  );
+  }
+  
+  /** Infer microservice from endpoint if not explicitly set */
+  public String resolveMicroservice() {
+  if (microservice != null && !microservice.isBlank()) return microservice;
+  if (endpoint == null) return “unknown”;
+  if (endpoint.contains(“device-info”))      return “dmd-device-info”;
+  if (endpoint.contains(“data-service”))     return “dmd-data-service”;
+  if (endpoint.contains(“features-service”)) return “dmd-features-service”;
+  if (endpoint.contains(“multidevice”))      return “dmd-multidevice-lookup”;
+  if (endpoint.contains(“wrapper”))          return “dmd-wrapper-service”;
+  return “unknown”;
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // toString — used for logging
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public String toString() {
+  return String.format(
+  “[HealingContext] scenario=%s | %s %s | status=%d | path=’%s’ | error=%s”,
+  scenarioId, method, endpoint, statusCode, originalPath, errorMessage
+  );
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Builder
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  public static class Builder {
+  
+  ```
+   private String scenarioId      = "unknown";
+   private String testName        = "unknown";
+   private String scenarioTags    = "";
+   private String method          = "GET";
+   private String endpoint        = "";
+   private String requestBody     = "";
+   private Map<String, String> requestHeaders;
+   private int    statusCode      = 0;
+   private String responseBody    = "";
+   private String errorMessage    = "";
+   private String errorType       = "";
+   private String originalPath    = "";
+   private String microservice    = "";
+  
+   private Builder() {}
+  
+   public Builder scenarioId(String v)                    { this.scenarioId     = nvl(v); return this; }
+   public Builder testName(String v)                      { this.testName       = nvl(v); return this; }
+   public Builder scenarioTags(String v)                  { this.scenarioTags   = nvl(v); return this; }
+   public Builder method(String v)                        { this.method         = nvl(v); return this; }
+   public Builder endpoint(String v)                      { this.endpoint       = nvl(v); return this; }
+   public Builder requestBody(String v)                   { this.requestBody    = nvl(v); return this; }
+   public Builder requestHeaders(Map<String, String> v)   { this.requestHeaders = v;      return this; }
+   public Builder statusCode(int v)                       { this.statusCode     = v;      return this; }
+   public Builder responseBody(String v)                  { this.responseBody   = nvl(v); return this; }
+   public Builder errorMessage(String v)                  { this.errorMessage   = nvl(v); return this; }
+   public Builder errorType(String v)                     { this.errorType      = nvl(v); return this; }
+   public Builder originalPath(String v)                  { this.originalPath   = nvl(v); return this; }
+   public Builder microservice(String v)                  { this.microservice   = nvl(v); return this; }
+  
+   /**
+    * Convenience: populate errorMessage and errorType from a Throwable.
+    */
+   public Builder fromThrowable(Throwable t) {
+       if (t != null) {
+           this.errorMessage = t.getMessage() != null ? t.getMessage() : t.toString();
+           this.errorType    = t.getClass().getSimpleName();
+       }
+       return this;
+   }
+  
+   public HealingContext build() {
+       return new HealingContext(this);
+   }
+  
+   private String nvl(String v) { return v != null ? v : ""; }
+  ```
+  
+  }
+  }
