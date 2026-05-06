@@ -1,0 +1,56 @@
+package com.yourco.dmd.healing;
+
+import com.yourco.dmd.healing.model.HealingSuggestion;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
+
+/**
+
+- Thread-safe in-memory store for all healing suggestions in a test run.
+- Cleared between runs via Maven Surefire’s forked JVM, or call clear() manually.
+  */
+  public class HealingRegistry {
+  
+  private static final Map<String, HealingSuggestion> REGISTRY = new ConcurrentHashMap<>();
+  
+  private HealingRegistry() {}
+  
+  /** Store a suggestion (called before retry). */
+  public static void register(String scenarioId, HealingSuggestion suggestion) {
+  REGISTRY.put(scenarioId, suggestion);
+  }
+  
+  /** Retrieve a suggestion for a given scenario. */
+  public static Optional<HealingSuggestion> getHeal(String scenarioId) {
+  return Optional.ofNullable(REGISTRY.get(scenarioId));
+  }
+  
+  /** Mark a scenario as skipped (no AI retry attempted). */
+  public static void markSkipped(String scenarioId) {
+  REGISTRY.computeIfPresent(scenarioId, (k, v) -> { v.markSkipped(); return v; });
+  }
+  
+  /** All suggestions — used by HealingExtentReporter for summary. */
+  public static Collection<HealingSuggestion> getAll() {
+  return Collections.unmodifiableCollection(REGISTRY.values());
+  }
+  
+  /** Clear registry (useful between parallel suite runs). */
+  public static void clear() {
+  REGISTRY.clear();
+  }
+  
+  /** Quick stats for logging. */
+  public static void printSummary() {
+  long healed = REGISTRY.values().stream()
+  .filter(s -> s.getStatus() == HealingSuggestion.HealingStatus.HEALED).count();
+  long failed = REGISTRY.values().stream()
+  .filter(s -> s.getStatus() == HealingSuggestion.HealingStatus.FAILED_AGAIN).count();
+  System.out.printf(”%n[HealingRegistry] Run complete: %d healed / %d real bugs / %d total%n”,
+  healed, failed, REGISTRY.size());
+  }
+  }
