@@ -1,0 +1,271 @@
+package com.dmd.api.listeners;
+
+import com.dmd.api.model.HealingContext;
+import com.dmd.api.model.HealingSuggestion;
+import com.dmd.api.utils.AiHealingEngine;
+import com.dmd.api.utils.ApiRequestUtil;
+import com.dmd.api.utils.HealingRegistry;
+import org.testng.ITestContext;
+import org.testng.ITestListener;
+import org.testng.ITestResult;
+
+/**
+
+- TestNG listener that intercepts test failures and triggers AI self-healing.
+- 
+- Flow:
+- onTestFailure  → check if healable → build HealingContext → call AI → register suggestion
+- onTestSuccess  → if this was a retry, mark suggestion as HEALED
+- onFinish       → print registry summary to console + CI logs
+- 
+- Register in testng-suites/*.xml:
+- <listener class-name="com.dmd.api.listeners.SelfHealingListener"/>
+- 
+- Place at: src/test/java/com/dmd/api/listeners/SelfHealingListener.java
+  */
+  public class SelfHealingListener implements ITestListener {
+  
+  private final AiHealingEngine healingEngine = new AiHealingEngine();
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Suite start
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public void onStart(ITestContext context) {
+  System.out.println(”[SelfHealingListener] 🤖 AI Self-Healing is ACTIVE for suite: “
+  + context.getName());
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Test failure — core healing trigger
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public void onTestFailure(ITestResult result) {
+  Throwable cause = result.getThrowable();
+  String scenarioId = resolveScenarioId(result);
+  
+  ```
+   System.out.printf("%n[SelfHealingListener] ❌ Failure detected: %s%n", result.getName());
+   System.out.printf("[SelfHealingListener]    Scenario ID : %s%n", scenarioId);
+   System.out.printf("[SelfHealingListener]    Error       : %s%n",
+           cause != null ? cause.getMessage() : "null");
+  
+   // ── Step 1: is this failure worth sending to AI? ──────────────────────
+   if (!isHealableFailure(cause)) {
+       System.out.println("[SelfHealingListener]    → Not healable (assertion/logic failure). Skipping AI.");
+       HealingRegistry.markSkipped(scenarioId);
+       return;
+   }
+  
+   // ── Step 2: build context ─────────────────────────────────────────────
+   HealingContext ctx = buildContext(result, scenarioId, cause);
+   System.out.printf("[SelfHealingListener]    → Sending to AI: %s %s%n",
+           ctx.getMethod(), ctx.getEndpoint());
+  
+   // ── Step 3: call AI healing engine ────────────────────────────────────
+   HealingSuggestion suggestion;
+   try {
+       suggestion = healingEngine.analyze(ctx);
+   } catch (Exception e) {
+       System.out.println("[SelfHealingListener]    ⚠ AI engine error: " + e.getMessage());
+       HealingRegistry.markSkipped(scenarioId);
+       return;
+   }
+  
+   // ── Step 4: register suggestion ───────────────────────────────────────
+   HealingRegistry.register(scenarioId, suggestion);
+  
+   if (suggestion.isHealable()) {
+       System.out.printf("[SelfHealingListener]    ✅ AI suggestion registered:%n");
+       System.out.printf("[SelfHealingListener]       Category  : %s%n",
+               suggestion.getFailureCategory());
+       System.out.printf("[SelfHealingListener]       Confidence: %.0f%%%n",
+               suggestion.getConfidence() * 100);
+       if (suggestion.hasPathFix()) {
+           System.out.printf("[SelfHealingListener]       Path fix  : %s → %s%n",
+                   suggestion.getOriginalPath(), suggestion.getSuggestedPath());
+       }
+       if (suggestion.hasEndpointFix()) {
+           System.out.printf("[SelfHealingListener]       URL fix   : %s → %s%n",
+                   suggestion.getOriginalEndpoint(), suggestion.getSuggestedEndpoint());
+       }
+       System.out.printf("[SelfHealingListener]       Reason    : %s%n",
+               suggestion.getExplanation());
+   } else {
+       System.out.printf("[SelfHealingListener]    🔴 AI says this is a real bug: %s%n",
+               suggestion.getExplanation());
+       suggestion.markSkipped();
+   }
+  ```
+  
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Test success — mark healed if this was a retry
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public void onTestSuccess(ITestResult result) {
+  String scenarioId = resolveScenarioId(result);
+  
+  ```
+   HealingRegistry.getHeal(scenarioId).ifPresent(suggestion -> {
+       if (suggestion.getStatus() == HealingSuggestion.HealingStatus.PENDING) {
+           suggestion.markHealed();
+           System.out.printf("[SelfHealingListener] ✅ HEALED: '%s' passed on retry.%n",
+                   result.getName());
+           System.out.printf("[SelfHealingListener]    Applied fix: %s%n",
+                   suggestion.hasPathFix()
+                       ? suggestion.getSuggestedPath()
+                       : suggestion.getSuggestedEndpoint());
+       }
+   });
+  ```
+  
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Test failure after retry — mark as real bug
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public void onTestFailedButWithinSuccessPercentage(ITestResult result) {
+  // Not used for DMD framework
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Suite finish — print summary
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  @Override
+  public void onFinish(ITestContext context) {
+  System.out.println(”\n” + “=”.repeat(60));
+  System.out.println(”[SelfHealingListener] 🤖 AI SELF-HEALING SUMMARY”);
+  System.out.println(”=”.repeat(60));
+  HealingRegistry.printSummary();
+  
+  ```
+   // Print per-scenario detail
+   HealingRegistry.getAll().forEach(s -> {
+       String icon = switch (s.getStatus()) {
+           case HEALED       -> "✅";
+           case FAILED_AGAIN -> "🔴";
+           case SKIPPED      -> "⏭";
+           default           -> "⏳";
+       };
+       System.out.printf("  %s %-50s [%s] %.0f%% confidence%n",
+               icon,
+               truncate(s.getTestName(), 50),
+               s.getFailureCategory(),
+               s.getConfidence() * 100);
+   });
+   System.out.println("=".repeat(60) + "\n");
+  ```
+  
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // isHealableFailure — structural failures only, never business logic
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  /**
+  - Returns true ONLY for structural/environmental failures.
+  - Business logic assertion failures (wrong value, wrong count etc.)
+  - are NOT healable — they must fail and alert the team.
+    */
+    private boolean isHealableFailure(Throwable t) {
+    if (t == null) return false;
+    String msg  = t.getMessage() != null ? t.getMessage().toLowerCase() : “”;
+    String type = t.getClass().getSimpleName().toLowerCase();
+    
+    // XPath failures
+    if (msg.contains(“no results for path”))        return true;
+    if (msg.contains(“xpath evaluation”))           return true;
+    if (msg.contains(“nodelist is empty”))          return true;
+    if (type.contains(“pathnotfound”))              return true;
+    
+    // JsonPath failures
+    if (msg.contains(“jsonpath”))                   return true;
+    if (msg.contains(“no value at json path”))      return true;
+    
+    // HTTP status mismatches that are likely env issues (not logic)
+    if (msg.contains(“expected status code <200>”) &&
+    msg.contains(“but was <404>”))              return true;  // endpoint moved
+    if (msg.contains(“expected status code <200>”) &&
+    msg.contains(“but was <503>”))              return true;  // env down
+    if (msg.contains(“connection refused”))         return true;
+    if (msg.contains(“connect timed out”))          return true;
+    
+    // Schema / field missing
+    if (msg.contains(“nullpointerexception”) &&
+    msg.contains(“response”))                   return true;
+    
+    // NOT healable — real assertion failures
+    // msg.contains(“expected”) && msg.contains(“but found”) → real bug
+    // msg.contains(“assertionError”) → real bug
+    return false;
+    }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Build HealingContext from TestNG result
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  private HealingContext buildContext(ITestResult result,
+  String scenarioId,
+  Throwable cause) {
+  // Try to get ApiRequestUtil from test instance (PicoContainer managed)
+  // ApiRequestUtil stores rich context in ScenarioContext during execution
+  Object testInstance = result.getInstance();
+  if (testInstance != null) {
+  try {
+  // Reflection-based access — works with PicoContainer step defs
+  java.lang.reflect.Field[] fields = testInstance.getClass().getDeclaredFields();
+  for (java.lang.reflect.Field f : fields) {
+  if (f.getType().equals(ApiRequestUtil.class)) {
+  f.setAccessible(true);
+  ApiRequestUtil util = (ApiRequestUtil) f.get(testInstance);
+  if (util != null) {
+  return util.buildHealingContext(result.getName(), cause);
+  }
+  }
+  }
+  } catch (Exception ignored) {
+  // Fall through to minimal context
+  }
+  }
+  
+  ```
+   // Fallback: minimal context when ApiRequestUtil not accessible
+   return HealingContext.builder()
+           .scenarioId(scenarioId)
+           .testName(result.getName())
+           .fromThrowable(cause)
+           .build();
+  ```
+  
+  }
+  
+  // ─────────────────────────────────────────────────────────────────────────
+  // Helpers
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  /**
+  - Resolves a stable scenario ID from the TestNG result.
+  - Uses className#methodName as the key — matches SelfHealingRetryAnalyzer.
+    */
+    private String resolveScenarioId(ITestResult result) {
+    // Try to get Cucumber scenario ID from result attributes (set by hooks)
+    Object scenarioId = result.getAttribute(“scenarioId”);
+    if (scenarioId instanceof String s && !s.isBlank()) return s;
+    
+    // Fallback: stable key from class + method name
+    return result.getTestClass().getName() + “#” + result.getName();
+    }
+  
+  private String truncate(String s, int max) {
+  if (s == null) return “”;
+  return s.length() <= max ? s : s.substring(0, max - 3) + “…”;
+  }
+  }
